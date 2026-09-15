@@ -1,0 +1,151 @@
+pam_hkpac 交付说明
+====================================================================
+
+一、交付物
+--------------------------------------------------------------------
+  本软件以 Debian 包形式交付。安装后：
+
+    /lib/<multiarch>/security/pam_hkpac.so   PAM 模块
+    /usr/share/pam-configs/pam-hkpac         PAM 配置条目
+    /usr/share/doc/pam-hkpac/                本文档及 README
+
+  安装 pam-hkpac 时，libpam-runtime 的 trigger 会自动执行
+  pam-auth-update，把该模块并入 /etc/pam.d/common-auth；
+  卸载时自动移除。因此安装/卸载都不需要手工改 PAM 配置。
+
+  适用环境：UOS / deepin（认证走 deepin-authentication 的系统）
+  模块依赖：仅 libpam / libc，不依赖 deepin-authentication
+
+
+二、背景与目标
+--------------------------------------------------------------------
+  目标：登录时把用户明文密码写入用户 keyring，供后续 SSO（如 proxy 认证）
+        复用，避免用户二次输入。
+
+  为什么需要专门做这个模块：
+    本系统认证链路上，`pam_exec expose_authtok` 在 PAM 层拿到的是密文
+    （密码在进入 PAM 之前已被 deepin-authentication 加密）。而本模块改为在
+    认证阶段直接向 PAM 会话取密码，拿到的是**明文**，写入 keyring。
+
+
+三、实现
+--------------------------------------------------------------------
+  模块随包安装到 PAM 模块目录，并通过 /usr/share/pam-configs/pam-hkpac
+  并入 common-auth，优先级 1025（高于 pam_deepin_authentication.so 的
+  1024），保证它在认证模块之前执行：
+
+      auth      optional    pam_hkpac.so key_name=ACpass
+
+  执行流程：
+    1) 本模块先 prompt 拿到用户密码（明文）；
+    2) 写入该用户 @u keyring（键名 ACpass）；
+    3) 返回 PAM_IGNORE，不影响认证结论；
+    4) 真正的认证仍由 common-auth 里的 pam_deepin_authentication.so 完成。
+
+  关于 key 权限（重要）：
+    Linux 的 add_key() 直接建在 @u 里的 key，默认权限是 3f010000
+    （possessor 全权、user 只有 view），**属主自己也读不出来**；而且此时调用
+    进程不是 possessor，连修改权限都会被拒。
+    本模块的做法：
+      先 join 会话 keyring -> 在里面建 key（进程即 possessor）
+      -> SETPERM 授权 possessor+属主可读（3f3f0000）-> 再 link 进 @u。
+    这样会话内任何以该用户身份运行的进程都能从 @u 读到。
+
+
+四、已验证的结果
+--------------------------------------------------------------------
+  测试账号：v00580
+  验证命令与结果：
+
+    $ sudo -u v00580 keyctl search @u user ACpass
+    375482527
+    $ sudo -u v00580 keyctl read 375482527
+    10 bytes of data in key:
+    47673132 33343536 372a
+
+  解码后内容为 `Gg1234567*`，与登录密码一致 -> **拿到的是明文，功能正确**。
+
+
+五、待完成的端到端验证（交付前必做）
+--------------------------------------------------------------------
+  目前只验证了"@u 里是明文"。整条 SSO 链路尚未跑通，请完成：
+
+    [ ] 登录 -> @u 中出现明文密码
+    [ ] start.sh 读到 @u 的值，加密后写入 @s，并 unlink @u
+    [ ] SSO 应用从 @s 解密得到正确明文
+    [ ] proxy 认证成功
+
+  另请确认：
+    [ ] 登录时是否要求输入两次密码（见"七、已知问题"）
+    [ ] 原 /etc/pam.d/lightdm 末尾注释掉的 PAM.sh 行已彻底废弃
+
+
+六、安装 / 卸载 / 回滚
+--------------------------------------------------------------------
+  安装：
+      sudo dpkg -i pam-hkpac_<版本>_<架构>.deb
+      # 或放入本地源后： sudo apt install pam-hkpac
+
+  卸载：
+      sudo dpkg -r pam-hkpac
+      # 或： sudo apt remove pam-hkpac
+
+  查看装了哪些文件：
+      dpkg -L pam-hkpac
+
+  查看本文档：
+      cat /usr/share/doc/pam-hkpac/DELIVERY.txt
+
+  若需要临时打开调试日志（排查用）：编辑 /usr/share/pam-configs/pam-hkpac，
+  把那一行改为
+      auth      optional    pam_hkpac.so key_name=ACpass debug log=/tmp/pam_hkpac.log
+  然后执行 sudo pam-auth-update --force；排查完改回并再次 pam-auth-update。
+
+  回滚（恢复安装前的 common-auth）：
+      sudo pam-auth-update --force        # 从当前 profiles 重新生成
+      # 或先 dpkg -r pam-hkpac 再执行 pam-auth-update
+
+
+七、已知问题
+--------------------------------------------------------------------
+  1) 可能双 prompt：
+     本模块会先 prompt 一次取密码；后续 pam_deepin_authentication.so
+     不支持 try_first_pass，可能再 prompt 一次，用户可能要输两次密码。
+     如需消除，需要给 deepin-authentication 的 PAM 模块增加 try_first_pass
+     支持（属于对平台侧的改动）。
+
+  2) debug 输出：
+     默认配置不含 debug；如需排查见"六、安装 / 卸载 / 回滚"。
+
+
+八、安全代价与风险（务必知悉）
+--------------------------------------------------------------------
+  1) 明文存在于 keyring：
+     写入的是 user 类型 key，payload 不加密，同 UID 的进程以及 root 均可读取。
+     依赖 start.sh 及时读走并 unlink @u 来缩短暴露窗口；若 start.sh 未执行或
+     失败，明文将一直留在 @u。
+
+  2) 依赖上层内部行为：
+     本模块能拿到明文，是因为上层 greeter 把密码明文拼在 "路径;token" 里回吐。
+     这是**平台内部实现，不是对外承诺的稳定接口**。
+     deepin-authentication / dde-session-shell 升级后，此行为可能改变，届时
+     本模块可能失效（拿不到值，或拿到密文）。
+
+  3) 安全边界未变：
+     本方案解决的是"能不能拿到明文"，不改变"明文最终落在用户可访问的
+     keyring 中"这一事实。是否可接受，需按安全要求评估。
+
+  4) 建议：
+     - 排查/交付后移除 debug 与日志文件；
+     - 明确哪些应用有权读取该 key；
+     - 评估 keyring 明文带来的风险。
+
+
+九、维护边界
+--------------------------------------------------------------------
+  - 本模块为客户定制件，不作为平台标准组件；
+  - 平台（deepin-authentication / dde-session-shell / lightdm）升级后，
+    需重新执行"五、待完成的端到端验证"，确认仍能拿到明文；
+  - 若上层改为回吐密文，本模块需相应调整或由平台侧提供正规取密接口。
+
+====================================================================

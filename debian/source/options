@@ -1,0 +1,7 @@
+tar-ignore = .git
+tar-ignore = .gitignore
+tar-ignore = dist
+tar-ignore = dist-prod
+tar-ignore = *.zip
+tar-ignore = *.so
+tar-ignore = *.o

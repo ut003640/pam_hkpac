@@ -1,0 +1,15 @@
+# 编译产物
+*.so
+*.o
+
+# 压缩包
+*.zip
+
+# Debian 打包残留（由 dh_clean 清理）
+debian/.debhelper/
+debian/*.debhelper/
+debian/*.debhelper.log
+debian/*.substvars
+debian/files
+debian/debhelper-build-stamp
+debian/pam-hkpac/

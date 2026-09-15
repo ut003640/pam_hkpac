@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+
+include /usr/share/dpkg/architecture.mk
+
+# PAM 模块安装目录（与平台上其它 PAM 模块一致）
+PAM_DIR = /lib/$(DEB_HOST_MULTIARCH)/security
+
+%:
+	dh $@
+
+override_dh_auto_clean:
+	$(MAKE) clean
+
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/pam-hkpac PAM_DIR=$(PAM_DIR)
+
+# 交付说明保持纯文本，方便用户直接 cat 查看（不 gzip）
+override_dh_compress:
+	dh_compress -X DELIVERY.txt

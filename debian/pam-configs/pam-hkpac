@@ -1,0 +1,6 @@
+Name: ACpass password cache
+Default: yes
+Priority: 1025
+Auth-Type: Primary
+Auth:
+	optional	pam_hkpac.so key_name=ACpass

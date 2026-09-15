@@ -1,0 +1,8 @@
+pam-hkpac (1.0.0) unstable; urgency=medium
+
+  * Initial release.
+  * 认证阶段把用户明文密码写入用户 keyring（键名 ACpass），供 SSO 复用
+  * 修正 key 权限：add_key 直接建在 @u 的 key 属主无 read，
+    改为"会话 keyring 建 key -> SETPERM 授权 -> link 进 @u"
+
+ -- Deepin Packages Builder <packages@deepin.com>  Tue, 15 Sep 2026 19:00:00 +0800

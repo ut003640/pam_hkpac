@@ -1,0 +1,10 @@
+#!/bin/sh
+
+set -e
+
+case "$1" in
+    configure)
+        # 把 /usr/share/pam-configs/pam-hkpac 并入 /etc/pam.d/common-auth
+        pam-auth-update --package --force
+        ;;
+esac

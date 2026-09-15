@@ -1,0 +1,28 @@
+Source: pam-hkpac
+Section: admin
+Priority: optional
+Maintainer: Deepin Packages Builder <packages@deepin.com>
+Build-Depends:
+ debhelper-compat (= 11),
+ libpam-dev,
+ pkg-config,
+Standards-Version: 4.3.0
+Homepage: http://www.deepin.org
+
+Package: pam-hkpac
+Architecture: any
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+Description: PAM module that caches the login password into the user keyring
+ pam_hkpac is a small PAM module which, during authentication, captures the
+ user's login password and stores it into the user keyring (@u, key name
+ "ACpass"), so that later single sign-on (SSO) consumers can reuse it without
+ prompting the user again.
+ .
+ The module performs no authentication itself: it returns PAM_IGNORE, and the
+ actual authentication is still carried out by the following modules
+ (e.g. pam_deepin_authentication.so in common-auth).
+ .
+ Note: the PAM service configuration (e.g. /etc/pam.d/lightdm) must be updated
+ separately to invoke this module.

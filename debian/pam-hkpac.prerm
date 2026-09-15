@@ -1,0 +1,10 @@
+#!/bin/sh
+
+set -e
+
+case "$1" in
+    remove)
+        # 从 /etc/pam.d/common-auth 移除本模块并重生成配置
+        pam-auth-update --package --remove pam-hkpac
+        ;;
+esac
