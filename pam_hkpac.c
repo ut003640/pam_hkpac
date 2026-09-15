@@ -12,8 +12,10 @@
  * 安装：
  *   install -m 644 pam_hkpac.so /usr/lib/x86_64-linux-gnu/security/
  *
- * 配置（/etc/pam.d/lightdm 的 auth 段，放在 auth substack common-auth 之前）：
- *   auth    optional    pam_hkpac.so key_name=ACpass debug log=/tmp/pam_hkpac.log
+ * 配置：放在认证模块（如 pam_deepin_authentication.so）**之前**。
+ *       本模块会自行取密码；取完立即把 PAM_AUTHTOK 还原成原值，
+ *       既拿到密码，也不污染下游模块的令牌。
+ *   auth    optional    pam_hkpac.so key_name=ACpass
  *
  * 参数：
  *   key_name=NAME   写入 @u 的键名，默认 ACpass
@@ -185,6 +187,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
     (void)flags;
     const char *user = NULL;
     const char *pass = NULL;
+    const char *saved_tok = NULL;
     const char *key_name = DEFAULT_KEY_NAME;
     const char *log_file = NULL;
     const char *payload = NULL;
@@ -205,12 +208,28 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
     if (debug && log_file)
         g_logfp = fopen(log_file, "a");
 
+    /*
+     * 先备份上游已设的 PAM_AUTHTOK（可能为 NULL），函数出口处原样还原。
+     *
+     * 必须在任何 goto out 之前做，否则像 pam_get_user 失败这种早退路径会
+     * 拿着未初始化的 saved_tok 去 pam_set_item，把令牌误清空。
+     *
+     * 早期版本用 pam_get_authtok() 后**没有还原** PAM_AUTHTOK，等于把令牌
+     * 槽位改成了本次 prompt 的响应（图形登录下是 "路径;token"），污染了给
+     * 下游模块的令牌，导致认证失败（登录报"密码错误"）。
+     */
+    pam_get_item(pamh, PAM_AUTHTOK, (const void **)&saved_tok);
+
     if (pam_get_user(pamh, &user, NULL) != PAM_SUCCESS || !user || !*user)
         goto out;
 
     /* 拿密码：PAM_AUTHTOK 已设则复用，否则经 conversation 提示 */
-    if (pam_get_authtok(pamh, PAM_AUTHTOK, &pass, NULL) != PAM_SUCCESS || !pass || !*pass)
+    if (pam_get_authtok(pamh, PAM_AUTHTOK, &pass, NULL) != PAM_SUCCESS ||
+        !pass || !*pass) {
+        if (debug)
+            dlog(pamh, "cannot obtain password, skip");
         goto out;
+    }
 
     if (debug) {
         dlog(pamh, "user='%s'", user);
@@ -241,6 +260,12 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
              key_name, user, rc == 0 ? "ok" : "FAILED");
 
 out:
+    /*
+     * 关键：把 PAM_AUTHTOK 还原成上游的原值（saved_tok 可能为 NULL），
+     * 不让本模块 prompt 的结果污染下游模块的认证令牌。
+     */
+    pam_set_item(pamh, PAM_AUTHTOK, saved_tok);
+
     if (g_logfp) {
         fclose(g_logfp);
         g_logfp = NULL;

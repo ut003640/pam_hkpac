@@ -117,6 +117,23 @@ pam_hkpac 交付说明
   2) debug 输出：
      默认配置不含 debug；如需排查见"六、安装 / 卸载 / 回滚"。
 
+  3) 登录报"密码错误"（令牌污染问题，当前版本已修复）：
+     本模块依赖 PAM 的认证令牌槽位 PAM_AUTHTOK 取密码。若模块在
+     pam_get_authtok() 取完密码后**没有把令牌还原**，就会把该槽位改写成
+     本次 prompt 的响应（图形登录下是 "路径;token"），污染下游认证模块的
+     令牌，表现为：**输入正确密码却被判为"密码错误"、无法登录**。
+     当前版本已在所有出口统一把 PAM_AUTHTOK 还原成上游原值，不再有该问题。
+     升级本包装后若仍遇到类似现象，按以下顺序排查：
+       a) 确认模块为新版、且 common-auth 里的引用正确：
+            grep -n pam_hkpac /etc/pam.d/common-auth
+            dpkg -L pam-hkpac
+       b) 看认证日志：
+            journalctl -b | grep -iE "pam_hkpac|pam_deepin_authentication|authentication failure"
+       c) 临时摘掉该行，确认是否即恢复正常（能恢复即证明是该行影响）：
+            sudo sed -i '/pam_hkpac/d' /etc/pam.d/common-auth
+            sudo pam-auth-update --force        # 或直接 dpkg -r pam-hkpac
+       d) 若界面已登不进去，用 Ctrl+Alt+F3 进 tty，以 root 执行上面 c) 的步骤。
+
 
 八、安全代价与风险（务必知悉）
 --------------------------------------------------------------------
