@@ -6,12 +6,16 @@ pam_hkpac 交付说明
   本软件以 Debian 包形式交付。安装后：
 
     /lib/<multiarch>/security/pam_hkpac.so   PAM 模块
-    /usr/share/pam-configs/pam-hkpac         PAM 配置条目
     /usr/share/doc/pam-hkpac/                本文档及 README
 
-  安装 pam-hkpac 时，libpam-runtime 的 trigger 会自动执行
-  pam-auth-update，把该模块并入 /etc/pam.d/common-auth；
-  卸载时自动移除。因此安装/卸载都不需要手工改 PAM 配置。
+  安装时包的维护者脚本会把下面这一行插入 /etc/pam.d/lightdm：
+
+      auth      optional pam_hkpac.so key_name=ACpass
+
+  插入位置：紧随 `auth substack common-auth` 之后。卸载时自动摘除，
+  并把原文件还原。原文件会先备份成 /etc/pam.d/lightdm.pam-hkpac.bak。
+
+  安装/卸载都不需要手工改 PAM 配置。
 
   适用环境：UOS / deepin（认证走 deepin-authentication 的系统）
   模块依赖：仅 libpam / libc，不依赖 deepin-authentication
@@ -24,23 +28,32 @@ pam_hkpac 交付说明
 
   为什么需要专门做这个模块：
     本系统认证链路上，`pam_exec expose_authtok` 在 PAM 层拿到的是密文
-    （密码在进入 PAM 之前已被 deepin-authentication 加密）。而本模块改为在
-    认证阶段直接向 PAM 会话取密码，拿到的是**明文**，写入 keyring。
+    （密码在进入 PAM 之前已被 deepin-authentication 加密）。而本模块从
+    PAM 认证令牌里取到的是**明文**，写入 keyring。
 
 
 三、实现
 --------------------------------------------------------------------
-  模块随包安装到 PAM 模块目录，并通过 /usr/share/pam-configs/pam-hkpac
-  并入 common-auth，优先级 1025（高于 pam_deepin_authentication.so 的
-  1024），保证它在认证模块之前执行：
-
-      auth      optional    pam_hkpac.so key_name=ACpass
+  模块是**纯旁路**的：不做认证、不发起任何 PAM 对话（不 prompt）、
+  不修改任何 PAM 令牌，只读上游认证模块已经写好的明文，然后写 keyring。
 
   执行流程：
-    1) 本模块先 prompt 拿到用户密码（明文）；
-    2) 写入该用户 @u keyring（键名 ACpass）；
-    3) 返回 PAM_IGNORE，不影响认证结论；
-    4) 真正的认证仍由 common-auth 里的 pam_deepin_authentication.so 完成。
+    1) pam_deepin_authentication.so 认证成功，并把明文写进 PAM_AUTHTOK；
+    2) 本模块（位于 common-auth 之后）只读 PAM_AUTHTOK 拿到明文；
+    3) 写入该用户 @u keyring（键名 ACpass）；
+    4) 返回 PAM_IGNORE，不影响认证结论。
+
+  为什么必须放在 /etc/pam.d/lightdm、且必须在 common-auth **之后**
+  （这一点很关键，放错位置会导致登录失败）：
+    - 放在 common-auth 里、pam_deepin_authentication.so 之前：
+      本模块若 prompt 取密码，会抢走图形登录整个流程中唯一的一次
+      conversation 应答（greeter 只在 onAuthFinished 里 respond 一次），
+      使得 deepin 自己的 prompt 永远等不到回答 -> **登录失败**。
+    - 放在 common-auth 里、pam_deepin_authentication.so 之后：
+      deepin 用的是 [success=end ...]，认证成功后直接跳到栈尾，
+      **不会执行本模块**，拿不到密码。
+    - 放在 `auth substack common-auth` 之后：两难皆无。此时 deepin 已认证
+      成功并写好令牌，本模块只读不改、零干扰，登录不受影响。
 
   关于 key 权限（重要）：
     Linux 的 add_key() 直接建在 @u 里的 key，默认权限是 3f010000
@@ -65,18 +78,19 @@ pam_hkpac 交付说明
 
   解码后内容为 `Gg1234567*`，与登录密码一致 -> **拿到的是明文，功能正确**。
 
+  注：该结果来自本模块自行 prompt 取密码的早期版本。改为只读令牌后，
+  取到的内容不变（deepin 写进 PAM_AUTHTOK 的就是这段明文），但登录不再受影响。
+
 
 五、待完成的端到端验证（交付前必做）
 --------------------------------------------------------------------
-  目前只验证了"@u 里是明文"。整条 SSO 链路尚未跑通，请完成：
-
+    [ ] 安装本包后，登录成功（不再报"密码错误"）
     [ ] 登录 -> @u 中出现明文密码
     [ ] start.sh 读到 @u 的值，加密后写入 @s，并 unlink @u
     [ ] SSO 应用从 @s 解密得到正确明文
     [ ] proxy 认证成功
 
   另请确认：
-    [ ] 登录时是否要求输入两次密码（见"七、已知问题"）
     [ ] 原 /etc/pam.d/lightdm 末尾注释掉的 PAM.sh 行已彻底废弃
 
 
@@ -87,7 +101,7 @@ pam_hkpac 交付说明
       # 或放入本地源后： sudo apt install pam-hkpac
 
   卸载：
-      sudo dpkg -r pam-hkpac
+      sudo dpkg -r pam-hkpac        # 会自动把那一行从 lightdm 里摘掉
       # 或： sudo apt remove pam-hkpac
 
   查看装了哪些文件：
@@ -96,42 +110,46 @@ pam_hkpac 交付说明
   查看本文档：
       cat /usr/share/doc/pam-hkpac/DELIVERY.txt
 
-  若需要临时打开调试日志（排查用）：编辑 /usr/share/pam-configs/pam-hkpac，
-  把那一行改为
-      auth      optional    pam_hkpac.so key_name=ACpass debug log=/tmp/pam_hkpac.log
-  然后执行 sudo pam-auth-update --force；排查完改回并再次 pam-auth-update。
+  查看插入结果：
+      grep -n pam_hkpac /etc/pam.d/lightdm
 
-  回滚（恢复安装前的 common-auth）：
-      sudo pam-auth-update --force        # 从当前 profiles 重新生成
-      # 或先 dpkg -r pam-hkpac 再执行 pam-auth-update
+  若需要临时打开调试日志（排查用）：把 /etc/pam.d/lightdm 里那一行改为
+      auth      optional pam_hkpac.so key_name=ACpass debug log=/tmp/pam_hkpac.log
+  排查完改回即可（改的是普通文本文件，无需 pam-auth-update）。
+
+  回滚（恢复安装前的 lightdm）：
+      sudo cp -a /etc/pam.d/lightdm.pam-hkpac.bak /etc/pam.d/lightdm
+      # 或直接 dpkg -r pam-hkpac
 
 
 七、已知问题
 --------------------------------------------------------------------
-  1) 可能双 prompt：
-     本模块会先 prompt 一次取密码；后续 pam_deepin_authentication.so
-     不支持 try_first_pass，可能再 prompt 一次，用户可能要输两次密码。
-     如需消除，需要给 deepin-authentication 的 PAM 模块增加 try_first_pass
-     支持（属于对平台侧的改动）。
+  1) 依赖上游写令牌：
+     本模块只读 PAM_AUTHTOK，不自己去取密码。若上游认证模块（或换了别的
+     认证模块）没有把明文写进 PAM_AUTHTOK，本模块会静默跳过，@u 里拿不到
+     值。排查时开 debug 看是否打印 "PAM_AUTHTOK not set by upstream module"。
 
   2) debug 输出：
      默认配置不含 debug；如需排查见"六、安装 / 卸载 / 回滚"。
 
-  3) 登录报"密码错误"（令牌污染问题，当前版本已修复）：
-     本模块依赖 PAM 的认证令牌槽位 PAM_AUTHTOK 取密码。若模块在
-     pam_get_authtok() 取完密码后**没有把令牌还原**，就会把该槽位改写成
-     本次 prompt 的响应（图形登录下是 "路径;token"），污染下游认证模块的
-     令牌，表现为：**输入正确密码却被判为"密码错误"、无法登录**。
-     当前版本已在所有出口统一把 PAM_AUTHTOK 还原成上游原值，不再有该问题。
-     升级本包装后若仍遇到类似现象，按以下顺序排查：
-       a) 确认模块为新版、且 common-auth 里的引用正确：
-            grep -n pam_hkpac /etc/pam.d/common-auth
-            dpkg -L pam-hkpac
+  3) 登录报"密码错误"（历史问题，1.0.1 已修复）：
+     现象：输入正确密码，界面仍报"密码错误"，无法登录。
+     原因：模块早期版本放在 common-auth 栈顶，并自行 pam_get_authtok() prompt
+     取密码。图形登录（dde-session-shell）整个认证过程只会 respond 一次
+     （greeter 的 onAuthFinished 里），这一次应答被本模块抢走后，下游
+     pam_deepin_authentication.so 的 prompt 永远等不到回答，认证失败。
+     修复：1.0.1 起模块不再 prompt、不再改令牌，只读上游写好的 PAM_AUTHTOK，
+     并且安装位置改到 /etc/pam.d/lightdm 的 `auth substack common-auth` 之后。
+     若升级后仍遇到，按以下顺序排查：
+       a) 确认装的是 1.0.1 及以后版本，且插入位置正确：
+            dpkg -l pam-hkpac
+            grep -n pam_hkpac /etc/pam.d/lightdm
+            # 正确形式：紧跟在 "auth      substack common-auth" 的下一行
        b) 看认证日志：
             journalctl -b | grep -iE "pam_hkpac|pam_deepin_authentication|authentication failure"
-       c) 临时摘掉该行，确认是否即恢复正常（能恢复即证明是该行影响）：
-            sudo sed -i '/pam_hkpac/d' /etc/pam.d/common-auth
-            sudo pam-auth-update --force        # 或直接 dpkg -r pam-hkpac
+       c) 临时摘掉那一行，确认是否即恢复正常（能恢复即证明是该行影响）：
+            sudo sed -i '/pam_hkpac/d' /etc/pam.d/lightdm
+            # 或 sudo dpkg -r pam-hkpac
        d) 若界面已登不进去，用 Ctrl+Alt+F3 进 tty，以 root 执行上面 c) 的步骤。
 
 
@@ -143,7 +161,8 @@ pam_hkpac 交付说明
      失败，明文将一直留在 @u。
 
   2) 依赖上层内部行为：
-     本模块能拿到明文，是因为上层 greeter 把密码明文拼在 "路径;token" 里回吐。
+     本模块能拿到明文，是因为上层 deepin-authentication 把密码明文写进了
+     PAM_AUTHTOK（其来源是 greeter 把密码拼在 "路径;token" 里回吐）。
      这是**平台内部实现，不是对外承诺的稳定接口**。
      deepin-authentication / dde-session-shell 升级后，此行为可能改变，届时
      本模块可能失效（拿不到值，或拿到密文）。
@@ -163,6 +182,7 @@ pam_hkpac 交付说明
   - 本模块为客户定制件，不作为平台标准组件；
   - 平台（deepin-authentication / dde-session-shell / lightdm）升级后，
     需重新执行"五、待完成的端到端验证"，确认仍能拿到明文；
-  - 若上层改为回吐密文，本模块需相应调整或由平台侧提供正规取密接口。
+  - 若上层改为不回吐明文（PAM_AUTHTOK 里不再是明文），本模块需相应调整，
+    或由平台侧提供正规取密接口。
 
 ====================================================================

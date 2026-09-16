@@ -12,10 +12,18 @@
  * 安装：
  *   install -m 644 pam_hkpac.so /usr/lib/x86_64-linux-gnu/security/
  *
- * 配置：放在认证模块（如 pam_deepin_authentication.so）**之前**。
- *       本模块会自行取密码；取完立即把 PAM_AUTHTOK 还原成原值，
- *       既拿到密码，也不污染下游模块的令牌。
- *   auth    optional    pam_hkpac.so key_name=ACpass
+ * 配置：必须放在 /etc/pam.d/lightdm 里、`auth substack common-auth` 的**之后**：
+ *
+ *   auth      substack common-auth
+ *   auth      optional pam_hkpac.so key_name=ACpass      <-- 插在这里
+ *   auth      required pam_permit.so
+ *
+ *   为什么不能进 common-auth：
+ *     - 放 pam_deepin_authentication.so 之前 → 本模块若 prompt，会抢走图形登录
+ *       那次唯一的 respond，导致 deepin 的 prompt 等不到回答，登录失败；
+ *     - 放它之后 → 它用的是 [success=end ...]，成功后直接跳到栈尾跳过本模块。
+ *   放在 substack common-auth 之后则两难皆无：deepin 已认证成功并把明文写进
+ *   PAM_AUTHTOK，本模块只读不改、不 prompt、零干扰。
  *
  * 参数：
  *   key_name=NAME   写入 @u 的键名，默认 ACpass
@@ -25,8 +33,8 @@
  * 注意：debug 只打元信息（长度/格式/掩码预览，不打完整密码），排查完请去掉 debug。
  *
  * 已知代价：
- *   1. 本模块会 prompt 一次拿密码，后面的 pam_deepin_authentication.so 不支持
- *      try_first_pass，可能再 prompt 一次（用户可能输两次密码）。
+ *   1. 本模块**不取密码、只读令牌**：若上游没有把明文写进 PAM_AUTHTOK
+ *      （例如换成不设该令牌的认证模块），本模块将静默跳过。
  *   2. 密码会以 user 类型 key 短暂存进 @u，同 UID + root 可读。
  */
 
@@ -187,7 +195,6 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
     (void)flags;
     const char *user = NULL;
     const char *pass = NULL;
-    const char *saved_tok = NULL;
     const char *key_name = DEFAULT_KEY_NAME;
     const char *log_file = NULL;
     const char *payload = NULL;
@@ -208,26 +215,26 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
     if (debug && log_file)
         g_logfp = fopen(log_file, "a");
 
-    /*
-     * 先备份上游已设的 PAM_AUTHTOK（可能为 NULL），函数出口处原样还原。
-     *
-     * 必须在任何 goto out 之前做，否则像 pam_get_user 失败这种早退路径会
-     * 拿着未初始化的 saved_tok 去 pam_set_item，把令牌误清空。
-     *
-     * 早期版本用 pam_get_authtok() 后**没有还原** PAM_AUTHTOK，等于把令牌
-     * 槽位改成了本次 prompt 的响应（图形登录下是 "路径;token"），污染了给
-     * 下游模块的令牌，导致认证失败（登录报"密码错误"）。
-     */
-    pam_get_item(pamh, PAM_AUTHTOK, (const void **)&saved_tok);
-
     if (pam_get_user(pamh, &user, NULL) != PAM_SUCCESS || !user || !*user)
         goto out;
 
-    /* 拿密码：PAM_AUTHTOK 已设则复用，否则经 conversation 提示 */
-    if (pam_get_authtok(pamh, PAM_AUTHTOK, &pass, NULL) != PAM_SUCCESS ||
+    /*
+     * 只读 PAM_AUTHTOK，绝不 prompt、绝不改写。
+     *
+     * 本模块由此位置（/etc/pam.d/lightdm 里 auth substack common-auth 之后）
+     * 运行时，上游 pam_deepin_authentication.so 已经把明文令牌写进
+     * PAM_AUTHTOK，直接取即可。
+     *
+     * 绝不能在这里调用 pam_get_authtok()：它会在令牌未设时主动 prompt，
+     * 而图形登录（dde-session-shell）整个认证过程只会 respond 一次
+     * （onAuthFinished 里），多一次 prompt 会把这次 respond 抢走，
+     * 导致下游 pam_deepin_authentication.so 的 prompt 永远等不到回答，
+     * 认证失败（表现为输入正确密码却报"密码错误"）。
+     */
+    if (pam_get_item(pamh, PAM_AUTHTOK, (const void **)&pass) != PAM_SUCCESS ||
         !pass || !*pass) {
         if (debug)
-            dlog(pamh, "cannot obtain password, skip");
+            dlog(pamh, "PAM_AUTHTOK not set by upstream module, skip");
         goto out;
     }
 
@@ -260,12 +267,6 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
              key_name, user, rc == 0 ? "ok" : "FAILED");
 
 out:
-    /*
-     * 关键：把 PAM_AUTHTOK 还原成上游的原值（saved_tok 可能为 NULL），
-     * 不让本模块 prompt 的结果污染下游模块的认证令牌。
-     */
-    pam_set_item(pamh, PAM_AUTHTOK, saved_tok);
-
     if (g_logfp) {
         fclose(g_logfp);
         g_logfp = NULL;

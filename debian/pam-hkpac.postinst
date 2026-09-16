@@ -2,9 +2,83 @@
 
 set -e
 
+PAM_LIGHTDM=/etc/pam.d/lightdm
+PAM_COMMON_AUTH=/etc/pam.d/common-auth
+PAM_LINE='auth      optional pam_hkpac.so key_name=ACpass'
+
+# 清理 <=1.0.0 残留在 common-auth 里的本模块。
+#
+# 旧版本通过 /usr/share/pam-configs/pam-hkpac + pam-auth-update 把它插进
+# common-auth 栈顶，那正是导致登录报"密码错误"的位置。升级到本版本后必须
+# 把残留摘掉；而且摘完**必须重跑 pam-auth-update**——因为它的 success=N 跳转
+# 是按含有本模块的栈算出来的（deepin 会从 success=4 变成 success=5），
+# 只删行不重算会让跳转错位。
+cleanup_old_common_auth() {
+    [ -f "$PAM_COMMON_AUTH" ] || return 0
+    grep -q 'pam_hkpac\.so' "$PAM_COMMON_AUTH" || return 0
+
+    tmp="$(mktemp)"
+    grep -v 'pam_hkpac\.so' "$PAM_COMMON_AUTH" > "$tmp" || true
+    cat "$tmp" > "$PAM_COMMON_AUTH"
+    rm -f "$tmp"
+
+    # 旧的 profile 一并清掉（新版包已不再携带该文件）
+    rm -f /usr/share/pam-configs/pam-hkpac
+
+    if command -v pam-auth-update >/dev/null 2>&1; then
+        pam-auth-update --package --force >/dev/null 2>&1 || true
+    fi
+
+    echo "pam-hkpac: 已清理旧版本残留在 $PAM_COMMON_AUTH 中的配置" >&2
+}
+
+# 把本模块插到 /etc/pam.d/lightdm 里 "auth substack common-auth" 之后。
+#
+# 为什么不走 pam-configs / common-auth：
+#   1) 插在 pam_deepin_authentication.so 之前：本模块一旦 prompt，就会抢走
+#      图形登录这一次唯一的 respond（greeter 只在 onAuthFinished 里 respond），
+#      导致 deepin 自己的 prompt 永远等不到回答，登录失败；
+#   2) 插在它之后：它用的是 [success=end ...]，成功后直接跳到栈尾，跳过本模块。
+# 放在 substack common-auth 之后两难皆无：deepin 已认证成功并把明文写进
+# PAM_AUTHTOK，本模块只读不改、不 prompt、零干扰。
+insert_line() {
+    [ -f "$PAM_LIGHTDM" ] || return 0
+
+    # 幂等：已经插过就不再动
+    if grep -q 'pam_hkpac\.so' "$PAM_LIGHTDM"; then
+        return 0
+    fi
+
+    # 只备份一次，便于人工回滚
+    if [ ! -f "${PAM_LIGHTDM}.pam-hkpac.bak" ]; then
+        cp -a "$PAM_LIGHTDM" "${PAM_LIGHTDM}.pam-hkpac.bak"
+    fi
+
+    tmp="$(mktemp)"
+    awk -v line="$PAM_LINE" '
+        { print }
+        !done && /^[[:space:]-]*auth[[:space:]]+substack[[:space:]]+common-auth([[:space:]]|$)/ {
+            print line
+            done = 1
+        }
+    ' "$PAM_LIGHTDM" > "$tmp"
+
+    # 没命中锚点就原样不动，避免把文件写坏
+    if ! grep -q 'pam_hkpac\.so' "$tmp"; then
+        rm -f "$tmp"
+        echo "pam-hkpac: 未在 $PAM_LIGHTDM 找到 'auth substack common-auth'，未做修改" >&2
+        return 0
+    fi
+
+    cat "$tmp" > "$PAM_LIGHTDM"
+    rm -f "$tmp"
+}
+
 case "$1" in
     configure)
-        # 把 /usr/share/pam-configs/pam-hkpac 并入 /etc/pam.d/common-auth
-        pam-auth-update --package --force
+        cleanup_old_common_auth
+        insert_line
         ;;
 esac
+
+exit 0

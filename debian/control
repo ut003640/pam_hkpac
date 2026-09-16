@@ -15,14 +15,19 @@ Depends:
  ${misc:Depends},
  ${shlibs:Depends},
 Description: PAM module that caches the login password into the user keyring
- pam_hkpac is a small PAM module which, during authentication, captures the
- user's login password and stores it into the user keyring (@u, key name
- "ACpass"), so that later single sign-on (SSO) consumers can reuse it without
- prompting the user again.
+ pam_hkpac is a small PAM module which, after authentication has succeeded,
+ reads the plaintext password from the PAM authentication token (PAM_AUTHTOK)
+ set by the authentication module and stores it into the user keyring (@u,
+ key name "ACpass"), so that later single sign-on (SSO) consumers can reuse it
+ without prompting the user again.
  .
- The module performs no authentication itself: it returns PAM_IGNORE, and the
- actual authentication is still carried out by the following modules
- (e.g. pam_deepin_authentication.so in common-auth).
+ The module performs no authentication itself and never talks to the PAM
+ conversation: it only reads PAM_AUTHTOK and always returns PAM_IGNORE, so it
+ cannot interfere with the modules that carry out the real authentication
+ (e.g. pam_deepin_authentication.so).
  .
- Note: the PAM service configuration (e.g. /etc/pam.d/lightdm) must be updated
- separately to invoke this module.
+ It is inserted by the package maintainer scripts into /etc/pam.d/lightdm,
+ right after the "auth substack common-auth" line.  It must not be placed
+ inside common-auth: before pam_deepin_authentication.so it would steal the
+ single PAM conversation response of the greeter, and after it the
+ [success=end] jump would skip it.
