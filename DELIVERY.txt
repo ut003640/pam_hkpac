@@ -93,6 +93,22 @@ pam_hkpac 交付说明
   另请确认：
     [ ] 原 /etc/pam.d/lightdm 末尾注释掉的 PAM.sh 行已彻底废弃
 
+  ★ 读/删 @u 里的键时，**必须显式写出 keyring**（这里踩过坑）：
+      serial=$(keyctl search @u user ACpass)   # 取 serial
+      keyctl pipe   "$serial"                  # 读明文（写进 @s 前的原文）
+      keyctl unlink "$serial" @u               # 删：一定要带 @u
+
+    为什么必须带 @u：`keyctl unlink <serial>` **不指定 keyring 时默认操作 @s
+    （会话 keyring）**，而本模块的键在 @u 里。不带 @u 时命令会输出
+    "0 links removed" 并且**退出码是 0**——看起来像成功，实际什么都没删，
+    明文会一直留在 @u 里。判断是否真的删掉，别只看退出码，要复核：
+      keyctl show @u | grep -q ACpass && echo "还在" || echo "已删除"
+
+    另外两条容易踩的：
+      - 别用 `sudo keyctl ...`：那操作的是 **root 自己的 @u**，用户的键不在
+        里面。要操作目标用户的键ring，用 `sudo -u <用户> keyctl ...`。
+      - 用户登出后 @u 随会话销毁，此时查不到是正常的（键已经没了）。
+
 
 六、安装 / 卸载 / 回滚
 --------------------------------------------------------------------
